@@ -1,0 +1,10 @@
+pandas>=2.0
+numpy>=1.24
+scipy>=1.11
+xarray>=2023.1
+cfgrib>=0.9.10
+matplotlib>=3.7
+dash>=2.14
+dash-leaflet>=1.0
+dash-bootstrap-components>=1.5
+pyarrow>=14.0
