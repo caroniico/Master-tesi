@@ -29,5 +29,8 @@ data/*.csv
 *.grib
 *.nc
 
+# VS Code workspace files
+*.code-workspace
+
 # Misc
 *.log
