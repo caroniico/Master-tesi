@@ -1,33 +1,84 @@
-"""Load pre-computed Parquet data and station metadata for the dashboard."""
+"""Load per-station Parquet data for the dashboard.
+
+Reads from data/per_station/*.parquet (built by build_station_datasets.py).
+Exposes the same API as the previous data_loader so layout/callbacks/figures
+require no structural changes.
+
+Column mapping (parquet → dashboard):
+  time            → valid_time
+  forcoast_p82_m  → dkss_p82_m   (alias for backward-compat with figures.py)
+  error_m         → computed as dkss_p82_m - tg_obs_m
+"""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-_PARQUET = _DATA_DIR / "hdm_tg_obs_all_stations.parquet"
-_STATIONS_JSON = _DATA_DIR / "stations.json"
+_PER_STATION_DIR = _DATA_DIR / "per_station"
 
 # ── Module-level cache ───────────────────────────────────────────────────
-_df: pd.DataFrame | None = None
+_station_cache: dict[str, pd.DataFrame] = {}
 _stations: list[dict] | None = None
+_all_df: pd.DataFrame | None = None
 
 
-def _ensure_loaded():
-    global _df, _stations
-    if _df is None:
-        if not _PARQUET.exists():
-            raise FileNotFoundError(
-                f"Data file not found: {_PARQUET}\n"
-                "Run  python prepare_data.py  first."
-            )
-        _df = pd.read_parquet(_PARQUET)
-        _df["valid_time"] = pd.to_datetime(_df["valid_time"])
-    if _stations is None:
-        with open(_STATIONS_JSON) as f:
-            _stations = json.load(f)
+def _load_station_parquets() -> None:
+    """Scan per_station/ dir, load all parquets, build unified cache."""
+    global _stations, _all_df
+
+    if not _PER_STATION_DIR.exists():
+        raise FileNotFoundError(
+            f"Per-station data directory not found: {_PER_STATION_DIR}\n"
+            "Run  python build_station_datasets.py  first."
+        )
+
+    parquet_files = sorted(_PER_STATION_DIR.glob("*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"No .parquet files found in {_PER_STATION_DIR}\n"
+            "Run  python build_station_datasets.py  first."
+        )
+
+    parts: list[pd.DataFrame] = []
+    for pf in parquet_files:
+        df = pd.read_parquet(pf)
+        # Normalise column names for dashboard compatibility
+        df = df.rename(columns={
+            "time": "valid_time",
+            "forcoast_p82_m": "dkss_p82_m",
+        })
+        df["valid_time"] = pd.to_datetime(df["valid_time"])
+        df["station_id"] = df["station_id"].astype(str)
+        df["error_m"] = df["dkss_p82_m"] - df["tg_obs_m"]
+        # Per-station cache keyed by str ID
+        sid = str(df["station_id"].iloc[0])
+        _station_cache[sid] = df
+        parts.append(df)
+
+    _all_df = pd.concat(parts, ignore_index=True)
+
+    # Build stations list from parquet metadata (no stations.json needed)
+    station_meta = (
+        _all_df[["station_id", "station_name", "lat", "lon"]]
+        .drop_duplicates(subset="station_id")
+        .sort_values("station_name")
+    )
+    _stations = [
+        {
+            "id": str(row["station_id"]),
+            "name": row["station_name"],
+            "lat": float(row["lat"]),
+            "lon": float(row["lon"]),
+        }
+        for _, row in station_meta.iterrows()
+    ]
+
+
+def _ensure_loaded() -> None:
+    if _all_df is None:
+        _load_station_parquets()
 
 
 def get_stations() -> list[dict]:
@@ -37,9 +88,9 @@ def get_stations() -> list[dict]:
 
 
 def get_dataframe() -> pd.DataFrame:
-    """Return the full DataFrame (cached in memory)."""
+    """Return the full concatenated DataFrame (cached in memory)."""
     _ensure_loaded()
-    return _df  # type: ignore[return-value]
+    return _all_df  # type: ignore[return-value]
 
 
 def get_station_data(
@@ -47,28 +98,25 @@ def get_station_data(
     start: str | None = None,
     end: str | None = None,
 ) -> pd.DataFrame:
-    """Slice the data for one station within an optional time window."""
+    """Return data for one station within an optional time window."""
     _ensure_loaded()
-    assert _df is not None
-    mask = _df["station_id"] == station_id
+    sid = str(station_id)
+    df = _station_cache.get(sid)
+    if df is None:
+        df = _all_df[_all_df["station_id"] == sid].copy()  # type: ignore[index]
+    else:
+        df = df.copy()
     if start:
-        ts = pd.Timestamp(start)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        mask &= _df["valid_time"] >= ts
+        df = df[df["valid_time"] >= pd.Timestamp(start)]
     if end:
-        ts = pd.Timestamp(end)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        mask &= _df["valid_time"] <= ts
-    return _df.loc[mask].copy()
+        df = df[df["valid_time"] <= pd.Timestamp(end)]
+    return df
 
 
 def get_time_range() -> tuple[str, str]:
     """Return (min_date, max_date) strings from the dataset."""
     _ensure_loaded()
-    assert _df is not None
     return (
-        _df["valid_time"].min().strftime("%Y-%m-%d"),
-        _df["valid_time"].max().strftime("%Y-%m-%d"),
+        _all_df["valid_time"].min().strftime("%Y-%m-%d"),  # type: ignore[index]
+        _all_df["valid_time"].max().strftime("%Y-%m-%d"),  # type: ignore[index]
     )

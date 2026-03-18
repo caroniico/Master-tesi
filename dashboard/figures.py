@@ -19,7 +19,7 @@ def make_time_plot(df: pd.DataFrame, station_name: str = "",
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
         row_heights=[0.6, 0.4],
-        subplot_titles=["Sea Level", "Error  ε(t) = DKSS − TG obs"],
+        subplot_titles=["Sea Level", "Error  ε(t) = FORCOAST − TG obs"],
     )
 
     if df.empty:
@@ -38,7 +38,7 @@ def make_time_plot(df: pd.DataFrame, station_name: str = "",
     fig.add_trace(go.Scattergl(
         x=df["valid_time"], y=df["dkss_p82_m"],
         mode="lines", line=dict(width=0.8, color="#E74C3C"),
-        name="DKSS model",
+        name="FORCOAST (HDM)",
     ), row=1, col=1)
 
     # Panel 2: error with fill to zero
@@ -57,7 +57,7 @@ def make_time_plot(df: pd.DataFrame, station_name: str = "",
     fig.add_hline(y=0, line_dash="dash", line_color="grey",
                   line_width=0.5, row=2, col=1)
 
-    title = "TG obs vs DKSS"
+    title = "TG obs vs FORCOAST (HDM)"
     if station_name:
         title += f"  —  {station_name}"
 
