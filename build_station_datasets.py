@@ -5,7 +5,7 @@ build_station_datasets.py
 Builds one Parquet file per tide-gauge station, combining:
   1. TG observations  (local CSV, 10 min -> hourly on-the-hour)
   2. FORCOAST HDM p82  (local GRIB, nearest-neighbor non-NaN)
-  3. Atmospheric forcings msl/t2m/u10/v10  (FTP monthly .tar.zst -> daily .nc)
+  3. Atmospheric forcings SLP/t2m/u10/v10  (FTP monthly .tar.zst -> daily .nc)
 
 Output: data/per_station/station_{id}_{name}.parquet
 See DATASET_ARCHITECTURE.md for full specification.
@@ -70,7 +70,7 @@ NAME_TO_ASCII = {
 
 # Atmospheric NetCDF variable mapping
 ATMO_VAR_MAP = {
-    "var1": "msl",
+    "var1": "SLP",
     "var11": "t2m",
     "var33": "u10",
     "var34": "v10",
@@ -412,7 +412,7 @@ def build_atmo_series(stations):
             pt_ts = monthly.isel(lat=i_lat, lon=i_lon)
             df_month = pd.DataFrame({
                 "time": pd.DatetimeIndex(pt_ts["time"].values),
-                "msl":  pt_ts["msl"].values.astype(np.float64),
+                "SLP":  pt_ts["SLP"].values.astype(np.float64),
                 "t2m":  pt_ts["t2m"].values.astype(np.float64),
                 "u10":  pt_ts["u10"].values.astype(np.float64),
                 "v10":  pt_ts["v10"].values.astype(np.float64),
@@ -435,7 +435,7 @@ def build_atmo_series(stations):
             atmo_data[sid] = pd.concat(dfs, ignore_index=True)
         else:
             atmo_data[sid] = pd.DataFrame(
-                columns=["time", "msl", "t2m", "u10", "v10"]
+                columns=["time", "SLP", "t2m", "u10", "v10"]
             )
     return atmo_data, atmo_meta
 
