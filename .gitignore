@@ -35,8 +35,6 @@ data/*.csv
 # Misc
 *.log
 
-# CSV exports
-data/csv/
 
 # Results folder
 RESULTS/
