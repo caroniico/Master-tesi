@@ -27,6 +27,7 @@ app = Dash(
     ],
     title="HDM Error Dashboard",
     update_title="Loading…",
+    suppress_callback_exceptions=True,
     meta_tags=[{"name": "viewport",
                 "content": "width=device-width, initial-scale=1"}],
 )

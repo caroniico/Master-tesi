@@ -125,7 +125,7 @@ def _brand_header() -> dbc.Navbar:
                         ),
                         dbc.Col(
                             html.Span(
-                                "ε(t) = FORCOAST − TG obs  ·  Danish Waters",
+                                "ε(t) = Model − TG obs  ·  Danish Waters",
                                 className="text-light opacity-75 small",
                             ),
                             className="d-flex align-items-center",
@@ -193,9 +193,9 @@ def build_layout() -> dbc.Container:
                                             dbc.RadioItems(
                                                 id="reg-method",
                                                 options=[
-                                                    {"label": "OLS (instant)",
+                                                    {"label": "MISO no lag",
                                                      "value": "ols"},
-                                                    {"label": "MISO Lag",
+                                                    {"label": "MISO lag",
                                                      "value": "miso"},
                                                 ],
                                                 value="ols",
@@ -236,6 +236,27 @@ def build_layout() -> dbc.Container:
                                         ],
                                     ),
 
+                                    # ── Bias correction toggle ────
+                                    _card(
+                                        "eraser-fill",
+                                        "Bias Correction",
+                                        [
+                                            html.P(
+                                                "Rimuove la media temporale di "
+                                                "(Model − TG) calcolata sull'intero "
+                                                "record di ogni stazione.",
+                                                className="text-muted small mb-2",
+                                                style={"lineHeight": "1.35"},
+                                            ),
+                                            dbc.Switch(
+                                                id="remove-bias-toggle",
+                                                label="Rimuovi bias",
+                                                value=False,
+                                                className="small",
+                                            ),
+                                        ],
+                                    ),
+
                                     # ── Map ──────────────────────
                                     _card(
                                         "map",
@@ -266,8 +287,6 @@ def build_layout() -> dbc.Container:
                                     # ── Stats cards ──────────────
                                     _card("bar-chart-line", "Error Statistics",
                                           [html.Div(id="stats-card")]),
-                                    _card("wind", "Regression  ε ~ Atmo",
-                                          [html.Div(id="regression-card")]),
                                 ],
                                 lg=3,
                                 md=4,
@@ -330,7 +349,34 @@ def build_layout() -> dbc.Container:
                                                     ),
                                                 ],
                                             ),
-                                            # ── Tab 2: Regression ─
+                                            # ── Tab 2: Error Statistics ─
+                                            dbc.Tab(
+                                                label="Error Statistics",
+                                                tab_id="error-stats",
+                                                children=[
+                                                    dbc.Card(
+                                                        dbc.CardBody(
+                                                            dcc.Loading(
+                                                                type="circle",
+                                                                color=_ACCENT,
+                                                                children=[
+                                                                    dcc.Graph(
+                                                                        id="error-stats-plot",
+                                                                        config={
+                                                                            "displayModeBar": True,
+                                                                            "displaylogo": False,
+                                                                        },
+                                                                        style={"height": "480px"},
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                            className="p-2",
+                                                        ),
+                                                        className="shadow-sm mb-3 mt-3",
+                                                    ),
+                                                ],
+                                            ),
+                                            # ── Tab 3: Regression ─
                                             dbc.Tab(
                                                 label="Regression",
                                                 tab_id="regression",
@@ -367,6 +413,26 @@ def build_layout() -> dbc.Container:
                                                                             "displaylogo": False,
                                                                         },
                                                                         style={"height": "320px"},
+                                                                    ),
+                                                                ],
+                                                            ),
+                                                            className="p-2",
+                                                        ),
+                                                        className="shadow-sm mb-3",
+                                                    ),
+                                                    dbc.Card(
+                                                        dbc.CardBody(
+                                                            dcc.Loading(
+                                                                type="circle",
+                                                                color=_ACCENT,
+                                                                children=[
+                                                                    dcc.Graph(
+                                                                        id="irf-plot",
+                                                                        config={
+                                                                            "displayModeBar": True,
+                                                                            "displaylogo": False,
+                                                                        },
+                                                                        style={"height": "280px"},
                                                                     ),
                                                                 ],
                                                             ),

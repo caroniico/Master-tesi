@@ -11,6 +11,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.stattools import acf
 from statsmodels.stats.stattools import durbin_watson
+from scipy.stats import skew, kurtosis
 
 
 # ── Colour helpers ───────────────────────────────────────────────────────
@@ -27,6 +28,23 @@ def _hex_to_rgb(hex_color: str) -> str:
     return ",".join(str(int(h[i : i + 2], 16)) for i in (0, 2, 4))
 
 
+def _apply_bias_correction(df: pd.DataFrame, remove_bias: bool) -> pd.DataFrame:
+    """Return a copy of *df* with ``error_m`` bias-corrected when *remove_bias* is True.
+
+    The per-station temporal mean bias is stored in the ``bias_m`` column by
+    ``data_loader``.  Subtracting it centres the error series to zero mean.
+    """
+    if not remove_bias or df.empty:
+        return df
+    df = df.copy()
+    if "bias_m" in df.columns:
+        df["error_m"] = df["error_m"] - df["bias_m"]
+    else:
+        # Fallback: compute bias on-the-fly from the slice
+        df["error_m"] = df["error_m"] - df["error_m"].mean()
+    return df
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # OVERVIEW tab figures (unchanged logic, kept as-is)
 # ═════════════════════════════════════════════════════════════════════════
@@ -35,12 +53,15 @@ def make_time_plot(
     df: pd.DataFrame,
     station_name: str = "",
     compare_data: list | None = None,
+    remove_bias: bool = False,
+    start_date: str = "",
+    end_date: str = "",
 ) -> go.Figure:
     """Time-domain: TG observation (blue) vs DKSS model (red), two panels."""
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
         row_heights=[0.6, 0.4],
-        subplot_titles=["Sea Level", "Error  ε(t) = FORCOAST − TG obs"],
+        subplot_titles=["Sea Level", "Error  ε(t) = Model − TG obs"],
     )
 
     if df.empty:
@@ -48,6 +69,9 @@ def make_time_plot(
                            font=dict(size=16, color="#888"), row=1, col=1)
         fig.update_layout(height=480, template="plotly_white")
         return fig
+
+    df = _apply_bias_correction(df, remove_bias)
+    bias_tag = "  [bias corretto]" if remove_bias else ""
 
     fig.add_trace(go.Scattergl(
         x=df["valid_time"], y=df["tg_obs_m"],
@@ -58,7 +82,7 @@ def make_time_plot(
     fig.add_trace(go.Scattergl(
         x=df["valid_time"], y=df["dkss_p82_m"],
         mode="lines", line=dict(width=0.8, color="#E74C3C"),
-        name="FORCOAST (HDM)",
+        name="Model (HDM)",
     ), row=1, col=1)
 
     fig.add_trace(go.Scattergl(
@@ -71,14 +95,18 @@ def make_time_plot(
     mean_err = df["error_m"].mean()
     fig.add_hline(y=mean_err, line_dash="dot", line_color="#E74C3C",
                   line_width=1, row=2, col=1,
-                  annotation_text=f"bias = {mean_err:+.4f} m",
+                  annotation_text=f"mean = {mean_err:+.4f} m",
                   annotation_position="top left")
     fig.add_hline(y=0, line_dash="dash", line_color="grey",
                   line_width=0.5, row=2, col=1)
 
-    title = "TG obs vs FORCOAST (HDM)"
+    title_parts = []
     if station_name:
-        title += f"  —  {station_name}"
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append("TG obs vs Model (HDM)")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    title = " · ".join(title_parts) + bias_tag
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
@@ -96,6 +124,7 @@ def make_time_plot(
         for i, (cdf, cname) in enumerate(compare_data):
             if cdf.empty:
                 continue
+            cdf = _apply_bias_correction(cdf, remove_bias)
             clr = _COMPARE_COLORS[i % len(_COMPARE_COLORS)]
             fig.add_trace(go.Scattergl(
                 x=cdf["valid_time"], y=cdf["error_m"],
@@ -110,9 +139,15 @@ def make_psd_plot(
     df: pd.DataFrame,
     station_name: str = "",
     compare_data: list | None = None,
+    remove_bias: bool = False,
+    start_date: str = "",
+    end_date: str = "",
 ) -> go.Figure:
     """Spectral amplitude of error vs period (log-log)."""
     fig = go.Figure()
+
+    df = _apply_bias_correction(df, remove_bias)
+    bias_tag = "  [bias corretto]" if remove_bias else ""
 
     signal = df["error_m"].dropna().values if not df.empty else np.array([])
     if len(signal) < 32:
@@ -175,9 +210,13 @@ def make_psd_plot(
                 align="center",
             )
 
-    title = "Normalised Error Amplitude Spectrum"
+    title_parts = []
     if station_name:
-        title += f"  —  {station_name}"
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append("Normalised Error Amplitude Spectrum")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    title = " · ".join(title_parts) + bias_tag
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
@@ -193,6 +232,7 @@ def make_psd_plot(
 
     if compare_data:
         for i, (cdf, cname) in enumerate(compare_data):
+            cdf = _apply_bias_correction(cdf, remove_bias)
             csig = cdf["error_m"].dropna().values if not cdf.empty else np.array([])
             if len(csig) < 32:
                 continue
@@ -220,12 +260,120 @@ def make_psd_plot(
     return fig
 
 
-def compute_stats(df: pd.DataFrame) -> dict:
+def make_error_stats_plot(
+    df: pd.DataFrame,
+    station_name: str = "",
+    remove_bias: bool = False,
+    start_date: str = "",
+    end_date: str = "",
+) -> go.Figure:
+    """Error distribution histogram with statistics overlay."""
+    fig = go.Figure()
+
+    if df.empty:
+        fig.add_annotation(text="No data for selection", showarrow=False,
+                           font=dict(size=16, color="#888"))
+        fig.update_layout(height=400, template="plotly_white")
+        return fig
+
+    df = _apply_bias_correction(df, remove_bias)
+    err = df["error_m"].dropna()
+    if len(err) < 10:
+        fig.add_annotation(text="Insufficient data for histogram",
+                           showarrow=False, font=dict(size=16, color="#888"))
+        fig.update_layout(height=400, template="plotly_white")
+        return fig
+
+    # Compute statistics
+    n = len(err)
+    mean_val = err.mean()
+    median_val = err.median()
+    std_val = err.std()
+    skew_val = float(skew(err))
+    kurt_val = float(kurtosis(err))
+    rmse_val = np.sqrt((err**2).mean())
+    mae_val = err.abs().mean()
+
+    # Convert to cm for display
+    err_cm = err * 100
+    mean_cm = mean_val * 100
+    median_cm = median_val * 100
+    std_cm = std_val * 100
+    rmse_cm = rmse_val * 100
+    mae_cm = mae_val * 100
+
+    # Histogram
+    fig.add_trace(go.Histogram(
+        x=err_cm,
+        nbinsx=50,
+        marker_color="#3498DB",
+        opacity=0.7,
+        name="Error Distribution",
+    ))
+
+    # Vertical lines for mean and median
+    fig.add_vline(x=mean_cm, line_dash="dash", line_color="#E74C3C",
+                  line_width=2, annotation_text=f"Mean: {mean_cm:+.2f} cm",
+                  annotation_position="top right")
+    fig.add_vline(x=median_cm, line_dash="dash", line_color="#27AE60",
+                  line_width=2, annotation_text=f"Median: {median_cm:+.2f} cm",
+                  annotation_position="top left")
+
+    # Title with station name, description, and date range
+    title_parts = []
+    if station_name:
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append("Error Distribution")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    
+    title = " · ".join(title_parts)
+
+    # Statistics annotation
+    stats_text = (
+        f"N = {n:,}<br>"
+        f"Mean = {mean_cm:+.2f} cm<br>"
+        f"Median = {median_cm:+.2f} cm<br>"
+        f"Std = {std_cm:.2f} cm<br>"
+        f"Skewness = {skew_val:+.3f}<br>"
+        f"Kurtosis = {kurt_val:+.3f}<br>"
+        f"RMSE = {rmse_cm:.2f} cm<br>"
+        f"MAE = {mae_cm:.2f} cm"
+    )
+
+    fig.add_annotation(
+        text=stats_text,
+        xref="paper", yref="paper",
+        x=0.02, y=0.98,
+        showarrow=False,
+        font=dict(size=11),
+        bgcolor="rgba(255,255,255,0.9)",
+        bordercolor="#ddd",
+        borderwidth=1,
+        borderpad=8,
+        align="left",
+    )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        xaxis_title="Error ε [cm]",
+        yaxis_title="Frequency",
+        template="plotly_white",
+        height=400,
+        margin=dict(l=60, r=20, t=60, b=40),
+        showlegend=False,
+    )
+
+    return fig
+
+
+def compute_stats(df: pd.DataFrame, remove_bias: bool = False) -> dict:
     """Compute error & data quality statistics from a station slice."""
     if df.empty:
         return {"total": 0, "valid": 0, "pct_valid": 0.0,
                 "bias": np.nan, "rmse": np.nan, "mae": np.nan, "std": np.nan}
 
+    df = _apply_bias_correction(df, remove_bias)
     err = df["error_m"].dropna()
     total, valid = len(df), len(err)
     bias = float(err.mean()) if valid else np.nan
@@ -253,14 +401,17 @@ def compute_regression(
     df: pd.DataFrame,
     method: str = "ols",
     lag: int = 0,
+    remove_bias: bool = False,
 ) -> dict:
     """Regression  ε(t) ~ f(SLP, T2m, u10, v10).
 
     Parameters
     ----------
-    df     : DataFrame with valid_time, SLP, t2m, u10, v10, error_m.
-    method : ``"ols"`` (instantaneous) or ``"miso"`` (MISO lag).
-    lag    : max lag *L* in hours (only when *method* = ``"miso"``).
+    df          : DataFrame with valid_time, SLP, t2m, u10, v10, error_m.
+    method      : ``"ols"`` (instantaneous) or ``"miso"`` (MISO lag).
+    lag         : max lag *L* in hours (only when *method* = ``"miso"``).
+    remove_bias : if True, subtract the per-station temporal mean bias from
+                  ``error_m`` before fitting.
 
     Returns dict with: ok, r2, rmse, bias, dw, coefs, n, method, lag,
                         y, y_pred, residuals, time, beta_matrix.
@@ -275,6 +426,8 @@ def compute_regression(
     needed = _REG_FEATURES + ["error_m"]
     if any(c not in df.columns for c in needed) or df.empty:
         return empty
+
+    df = _apply_bias_correction(df, remove_bias)
 
     if method == "miso" and lag >= 1:
         return _compute_miso(df, lag, empty)
@@ -360,7 +513,7 @@ def _compute_miso(df: pd.DataFrame, lag: int, empty: dict) -> dict:
 
 # ── Regression figures ──────────────────────────────────────────────────
 
-def make_regression_plot(reg: dict, station_name: str = "") -> go.Figure:
+def make_regression_plot(reg: dict, station_name: str = "", start_date: str = "", end_date: str = "") -> go.Figure:
     """Dispatch to OLS or MISO figure builder."""
     if not reg.get("ok"):
         fig = go.Figure()
@@ -370,21 +523,19 @@ def make_regression_plot(reg: dict, station_name: str = "") -> go.Figure:
         return fig
 
     if reg["method"] == "miso":
-        return _make_miso_fig(reg, station_name)
-    return _make_ols_fig(reg, station_name)
+        return _make_miso_fig(reg, station_name, start_date, end_date)
+    return _make_ols_fig(reg, station_name, start_date, end_date)
 
 
-def _make_ols_fig(reg: dict, station_name: str) -> go.Figure:
-    """OLS: row-1 time series, row-2 scatter + β-bar."""
+def _make_ols_fig(reg: dict, station_name: str, start_date: str = "", end_date: str = "") -> go.Figure:
+    """OLS: time series ε observed vs predicted + β bar chart."""
     fig = make_subplots(
-        rows=2, cols=2,
-        specs=[[{"colspan": 2}, None], [{}, {}]],
-        row_heights=[0.55, 0.45],
+        rows=2, cols=1,
+        row_heights=[0.6, 0.4],
         vertical_spacing=0.14,
-        horizontal_spacing=0.15,
         subplot_titles=[
-            "ε(t) observed  vs  predicted", "",
-            "Scatter: obs vs pred", "Standardised coefficients β",
+            "ε(t) observed  vs  predicted",
+            "Standardised coefficients β",
         ],
     )
 
@@ -403,25 +554,7 @@ def _make_ols_fig(reg: dict, station_name: str) -> go.Figure:
     fig.add_hline(y=0, line_dash="dash", line_color="grey",
                   line_width=0.5, row=1, col=1)
 
-    # Row 2 left — scatter
-    lim = max(abs(y).max(), abs(yp).max()) * 1.05
-    fig.add_trace(go.Scattergl(
-        x=y, y=yp, mode="markers",
-        marker=dict(size=2, color="#8E44AD", opacity=0.20),
-        showlegend=False,
-    ), row=2, col=1)
-    fig.add_trace(go.Scatter(
-        x=[-lim, lim], y=[-lim, lim], mode="lines",
-        line=dict(color="grey", dash="dash", width=1), showlegend=False,
-    ), row=2, col=1)
-    fig.add_annotation(
-        text=f"R² = {reg['r2']:.3f}", xref="x3", yref="y3",
-        x=lim * 0.6, y=-lim * 0.7, showarrow=False,
-        font=dict(size=11, color="#555"),
-        bgcolor="rgba(255,255,255,0.8)",
-    )
-
-    # Row 2 right — β bar
+    # Row 2 — β bar chart
     labels = list(reg["coefs"].keys())
     coefs = list(reg["coefs"].values())
     colors = ["#C0392B" if v < 0 else "#1A6B9A" for v in coefs]
@@ -429,14 +562,22 @@ def _make_ols_fig(reg: dict, station_name: str) -> go.Figure:
         y=labels, x=coefs, orientation="h", marker_color=colors,
         text=[f"{v:+.4f}" for v in coefs], textposition="outside",
         textfont=dict(size=10), showlegend=False,
-    ), row=2, col=2)
-    fig.add_vline(x=0, line_color="grey", line_width=1, row=2, col=2)
+    ), row=2, col=1)
+    fig.add_vline(x=0, line_color="grey", line_width=1, row=2, col=1)
 
     name_tag = f"<b>{station_name}</b>  ·  " if station_name else ""
+    title_parts = []
+    if station_name:
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append("OLS Regression")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    title = " · ".join(title_parts)
+    
     fig.update_layout(
         title=dict(
             text=(
-                f"{name_tag}<b>OLS Regression</b>"
+                f"{title}"
                 f"<br><span style='font-size:11px;color:#666'>"
                 f"R² = {reg['r2']:.3f}  ·  "
                 f"RMSE = {reg['rmse'] * 100:.2f} cm  ·  "
@@ -449,39 +590,28 @@ def _make_ols_fig(reg: dict, station_name: str) -> go.Figure:
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
     )
-    fig.update_xaxes(title_text="ε observed [m]", row=2, col=1)
-    fig.update_yaxes(title_text="ε predicted [m]", row=2, col=1)
-    fig.update_xaxes(title_text="β [m/σ]", row=2, col=2)
+    fig.update_xaxes(title_text="β [m/σ]", row=2, col=1)
     fig.update_yaxes(title_text="Error [m]", row=1, col=1)
 
     return fig
 
 
-def _make_miso_fig(reg: dict, station_name: str) -> go.Figure:
-    """MISO: row-1 time series, row-2 scatter + residual histogram, row-3 IRFs."""
+def _make_miso_fig(reg: dict, station_name: str, start_date: str = "", end_date: str = "") -> go.Figure:
+    """MISO: time series ε observed vs predicted + β bar chart (lag-0 coefficients)."""
     L = reg["lag"]
-    n_feat = len(_REG_FEATURES)
 
     fig = make_subplots(
-        rows=3, cols=n_feat,
-        specs=[
-            [{"colspan": n_feat}, *([None] * (n_feat - 1))],
-            [{"colspan": 2}, None, {"colspan": 2}, None],
-            [{} for _ in range(n_feat)],
-        ],
-        row_heights=[0.25, 0.25, 0.50],
-        vertical_spacing=0.09,
-        horizontal_spacing=0.06,
+        rows=2, cols=1,
+        row_heights=[0.6, 0.4],
+        vertical_spacing=0.14,
         subplot_titles=[
-            "ε(t) observed  vs  predicted", "",
-            "Scatter: obs vs pred", "Residuals distribution",
-        ] + [f"IRF — {lbl}" for lbl in _REG_LABELS],
+            "ε(t) observed  vs  predicted",
+            "Standardised coefficients β (lag 0)",
+        ],
     )
 
     y, yp = reg["y"], reg["y_pred"]
-    residuals, t = reg["residuals"], reg["time"]
-    beta = reg["beta_matrix"]
-    lags_x = np.arange(L + 1)
+    t = reg["time"]
 
     # Row 1 — time series
     if t is not None:
@@ -497,53 +627,31 @@ def _make_miso_fig(reg: dict, station_name: str) -> go.Figure:
     fig.add_hline(y=0, line_dash="dash", line_color="grey",
                   line_width=0.5, row=1, col=1)
 
-    # Row 2 left — scatter
-    lim = max(abs(y).max(), abs(yp).max()) * 1.05
-    fig.add_trace(go.Scattergl(
-        x=y, y=yp, mode="markers",
-        marker=dict(size=2, color="#8E44AD", opacity=0.15),
-        showlegend=False,
+    # Row 2 — β bar chart (lag-0 coefficients)
+    labels = list(reg["coefs"].keys())
+    coefs = list(reg["coefs"].values())
+    colors = ["#C0392B" if v < 0 else "#1A6B9A" for v in coefs]
+    fig.add_trace(go.Bar(
+        y=labels, x=coefs, orientation="h", marker_color=colors,
+        text=[f"{v:+.4f}" for v in coefs], textposition="outside",
+        textfont=dict(size=10), showlegend=False,
     ), row=2, col=1)
-    fig.add_trace(go.Scatter(
-        x=[-lim, lim], y=[-lim, lim], mode="lines",
-        line=dict(color="grey", dash="dash", width=1), showlegend=False,
-    ), row=2, col=1)
-
-    # Row 2 right — residuals histogram
-    fig.add_trace(go.Histogram(
-        x=residuals, nbinsx=80,
-        marker_color="rgba(39,174,96,0.65)", showlegend=False,
-    ), row=2, col=3)
-
-    # Row 3 — IRF panels
-    for i, (lbl, clr) in enumerate(zip(_REG_LABELS, _IRF_COLORS)):
-        fig.add_trace(go.Scatter(
-            x=lags_x, y=beta[i], mode="lines",
-            line=dict(width=2.0, color=clr),
-            fill="tozeroy",
-            fillcolor=f"rgba({_hex_to_rgb(clr)},0.15)",
-            showlegend=False, name=lbl,
-        ), row=3, col=i + 1)
-        fig.add_hline(y=0, line_dash="dash", line_color="grey",
-                      line_width=0.7, row=3, col=i + 1)
-        # peak annotation
-        peak_k = int(np.argmax(np.abs(beta[i])))
-        peak_v = beta[i, peak_k]
-        fig.add_annotation(
-            x=peak_k, y=peak_v, text=f"k={peak_k}h",
-            showarrow=True, arrowhead=2, arrowsize=0.8,
-            font=dict(size=8, color=clr), row=3, col=i + 1,
-        )
-        fig.update_xaxes(title_text="Lag k [h]", title_font_size=10,
-                         row=3, col=i + 1)
-        fig.update_yaxes(title_text="β [m/σ]", title_font_size=10,
-                         row=3, col=i + 1)
+    fig.add_vline(x=0, line_color="grey", line_width=1, row=2, col=1)
 
     name_tag = f"<b>{station_name}</b>  ·  " if station_name else ""
+    title_parts = []
+    if station_name:
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append(f"MISO Lag Regression (L = {L} h)")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    title = " · ".join(title_parts)
+    
+    n_feat = len(_REG_FEATURES)
     fig.update_layout(
         title=dict(
             text=(
-                f"{name_tag}<b>MISO Lag Regression</b>  (L = {L} h)"
+                f"{title}"
                 f"<br><span style='font-size:11px;color:#666'>"
                 f"R² = {reg['r2']:.3f}  ·  "
                 f"RMSE = {reg['rmse'] * 100:.2f} cm  ·  "
@@ -552,15 +660,12 @@ def _make_miso_fig(reg: dict, station_name: str) -> go.Figure:
             ),
             font=dict(size=14),
         ),
-        template="plotly_white", height=780,
-        margin=dict(l=50, r=25, t=80, b=45),
+        template="plotly_white", height=480,
+        margin=dict(l=55, r=25, t=80, b=45),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
     )
-    fig.update_xaxes(title_text="ε observed [m]", row=2, col=1)
-    fig.update_yaxes(title_text="ε predicted [m]", row=2, col=1)
-    fig.update_xaxes(title_text="Residual [m]", row=2, col=3)
-    fig.update_yaxes(title_text="Count", row=2, col=3)
+    fig.update_xaxes(title_text="β [m/σ]", row=2, col=1)
     fig.update_yaxes(title_text="Error [m]", row=1, col=1)
 
     return fig
@@ -572,6 +677,9 @@ def make_acf_plot(
     reg: dict | None = None,
     station_name: str = "",
     df: pd.DataFrame | None = None,
+    remove_bias: bool = False,
+    start_date: str = "",
+    end_date: str = "",
 ) -> go.Figure:
     """ACF of regression residuals (preferred) or raw ε(t)."""
     fig = go.Figure()
@@ -585,6 +693,7 @@ def make_acf_plot(
         acf_label = f"Regression Residuals ({meth})"
         dw_val = reg["dw"]
     elif df is not None and not df.empty and "error_m" in df.columns:
+        df = _apply_bias_correction(df, remove_bias)
         series = df["error_m"].dropna().values
         acf_label = "Raw Error ε(t)"
         dw_val = float(durbin_watson(series)) if len(series) > 1 else np.nan
@@ -643,9 +752,13 @@ def make_acf_plot(
                 showarrow=False, font=dict(size=8, color="#aaa"),
             )
 
-    title = f"ACF — {acf_label}"
+    title_parts = []
     if station_name:
-        title += f"  ·  {station_name}"
+        title_parts.append(f"<b>{station_name}</b>")
+    title_parts.append(f"ACF — {acf_label}")
+    if start_date and end_date:
+        title_parts.append(f"{start_date} → {end_date}")
+    title = " · ".join(title_parts)
 
     dw_text = f"DW = {dw_val:.2f}" if not np.isnan(dw_val) else ""
     extra_annots = ()
@@ -669,5 +782,66 @@ def make_acf_plot(
         height=320,
         margin=dict(l=55, r=25, t=55, b=45),
         annotations=fig.layout.annotations + extra_annots,
+    )
+    return fig
+
+
+# ── IRF plot (4 panels horizontal) ─────────────────────────────────────
+
+def make_irf_plot(reg: dict, station_name: str = "", start_date: str = "", end_date: str = "") -> go.Figure:
+    """Impulse Response Functions β(k) for each atmospheric variable (1×4 grid)."""
+    beta = reg.get("beta_matrix") if reg and reg.get("ok") else None
+
+    if beta is None:
+        fig = go.Figure()
+        msg = "IRF available only for MISO lag method"
+        fig.add_annotation(text=msg, showarrow=False,
+                           font=dict(size=14, color="#888"))
+        fig.update_layout(height=250, template="plotly_white")
+        return fig
+
+    L = reg["lag"]
+    n_feat = len(_REG_LABELS)
+    lags_arr = np.arange(L + 1)
+
+    fig = make_subplots(
+        rows=1, cols=n_feat, shared_yaxes=True,
+        subplot_titles=[f"IRF — {lbl}" for lbl in _REG_LABELS],
+        horizontal_spacing=0.06,
+    )
+
+    for i, lbl in enumerate(_REG_LABELS):
+        clr = _IRF_COLORS[i % len(_IRF_COLORS)]
+        betas = beta[i, :]
+
+        # stems
+        for k, b in enumerate(betas):
+            fig.add_shape(
+                type="line", x0=k, x1=k, y0=0, y1=b,
+                line=dict(color=clr, width=1.0),
+                row=1, col=i + 1,
+            )
+        # markers
+        fig.add_trace(go.Scatter(
+            x=lags_arr, y=betas, mode="markers",
+            marker=dict(size=3, color=clr),
+            showlegend=False,
+        ), row=1, col=i + 1)
+
+        fig.add_hline(y=0, line_color="grey", line_width=0.5, row=1, col=i + 1)
+        fig.update_xaxes(title_text="Lag [h]", row=1, col=i + 1)
+
+    fig.update_yaxes(title_text="β [m/σ]", row=1, col=1)
+
+    title = "Impulse Response Functions"
+    if station_name:
+        title += f"  ·  {station_name}"
+    title += f"  (L = {L} h)"
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=13)),
+        template="plotly_white",
+        height=280,
+        margin=dict(l=55, r=25, t=60, b=45),
     )
     return fig

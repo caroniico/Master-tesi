@@ -8,6 +8,7 @@ Column mapping (parquet → dashboard):
   time            → valid_time
   forcoast_p82_m  → dkss_p82_m   (alias for backward-compat with figures.py)
   error_m         → computed as dkss_p82_m - tg_obs_m
+  bias_m          → temporal mean of error_m over the full record (per station)
 """
 from __future__ import annotations
 
@@ -15,13 +16,15 @@ from pathlib import Path
 
 import pandas as pd
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_DATA_DIR = Path("/Users/nicolocaron/Desktop/MASTER PROJECT/data")
 _PER_STATION_DIR = _DATA_DIR / "per_station"
 
 # ── Module-level cache ───────────────────────────────────────────────────
 _station_cache: dict[str, pd.DataFrame] = {}
 _stations: list[dict] | None = None
 _all_df: pd.DataFrame | None = None
+# Per-station temporal mean bias: {station_id: bias_m}
+_station_bias: dict[str, float] = {}
 
 
 def _load_station_parquets() -> None:
@@ -52,8 +55,11 @@ def _load_station_parquets() -> None:
         df["valid_time"] = pd.to_datetime(df["valid_time"])
         df["station_id"] = df["station_id"].astype(str)
         df["error_m"] = df["dkss_p82_m"] - df["tg_obs_m"]
-        # Per-station cache keyed by str ID
+        # Compute and store temporal mean bias for this station
         sid = str(df["station_id"].iloc[0])
+        _station_bias[sid] = float(df["error_m"].mean())
+        df["bias_m"] = _station_bias[sid]   # constant column for convenience
+        # Per-station cache keyed by str ID
         _station_cache[sid] = df
         parts.append(df)
 
@@ -120,3 +126,12 @@ def get_time_range() -> tuple[str, str]:
         _all_df["valid_time"].min().strftime("%Y-%m-%d"),  # type: ignore[index]
         _all_df["valid_time"].max().strftime("%Y-%m-%d"),  # type: ignore[index]
     )
+
+
+def get_station_bias(station_id: str) -> float:
+    """Return the temporal mean bias (Model − TG) for *station_id* over the full record.
+
+    This value can be subtracted from ``error_m`` to obtain a bias-corrected error.
+    """
+    _ensure_loaded()
+    return _station_bias.get(str(station_id), 0.0)

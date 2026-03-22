@@ -40,7 +40,7 @@ import zstandard as zstd
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATIONS_JSON = PROJECT_DIR / "data" / "stations.json"
-OUTPUT_DIR = PROJECT_DIR / "data" / "per_station"
+OUTPUT_DIR = Path("/Users/nicolocaron/Desktop/MASTER PROJECT/data/per_station")
 
 # Local data paths
 TG_DIR = Path("/home/nicaro/DATA/HIDRA3_training_data/2013_2022_Tidal_Gauges")

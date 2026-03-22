@@ -1,6 +1,7 @@
 """Dash callbacks: wire map clicks, dropdown, date picker to plots."""
 from __future__ import annotations
 
+import pandas as pd
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, html
 
@@ -15,52 +16,51 @@ from . import data_loader, figures
     prevent_initial_call=True,
 )
 def marker_click_to_dropdown(n_clicks_list, current_value):
+    """When a map marker is clicked, update the station dropdown."""
     if not ctx.triggered_id or not any(n_clicks_list):
         return current_value
     return ctx.triggered_id["index"]
 
 
-# ── Show / hide lag slider ───────────────────────────────────────────────
+# ── Show/hide lag slider based on regression method ──────────────────────
 @callback(
     Output("lag-control", "style"),
     Input("reg-method", "value"),
 )
-def toggle_lag_control(method):
+def toggle_lag_slider(method):
+    """Show the lag slider only when MISO lag is selected."""
     if method == "miso":
         return {"display": "block"}
     return {"display": "none"}
 
 
-# ── Station + DateRange + Regression → all plots + stats ─────────────────
+# ── Station + DateRange → plots + stats ──────────────────────────────────
 @callback(
     Output("time-plot", "figure"),
     Output("psd-plot", "figure"),
     Output("stats-card", "children"),
-    Output("regression-card", "children"),
-    Output("regression-plot", "figure"),
-    Output("acf-plot", "figure"),
     Input("station-dropdown", "value"),
     Input("compare-dropdown", "value"),
     Input("date-range", "start_date"),
     Input("date-range", "end_date"),
-    Input("reg-method", "value"),
-    Input("lag-slider", "value"),
+    Input("remove-bias-toggle", "value"),
 )
-def update_plots(station_id, compare_ids, start_date, end_date,
-                 reg_method, lag_value):
+def update_plots(station_id, compare_ids, start_date, end_date, remove_bias):
+    """Fetch data for selected station/period and regenerate plots."""
+    remove_bias = bool(remove_bias)
     if not station_id:
-        empty = figures.make_time_plot(data_loader.get_dataframe().iloc[:0])
-        return empty, empty, "", "", empty, empty
+        empty = figures.make_time_plot(pd.DataFrame())
+        return empty, empty, ""
 
-    # Station name
+    # Look up station name
     stations = data_loader.get_stations()
     name_map = {s["id"]: s["name"] for s in stations}
     station_name = name_map.get(station_id, station_id)
 
-    # Primary data
+    # Slice data for primary station
     df = data_loader.get_station_data(station_id, start_date, end_date)
 
-    # Comparison data
+    # Build comparison list: [(df, name), …]
     compare_data = []
     if compare_ids:
         for cid in compare_ids:
@@ -70,159 +70,113 @@ def update_plots(station_id, compare_ids, start_date, end_date,
             cname = name_map.get(cid, cid)
             compare_data.append((cdf, cname))
 
-    # ── Overview plots ────────────────────────────────────────────
-    fig_time = figures.make_time_plot(
-        df, station_name, compare_data=compare_data
-    )
-    fig_psd = figures.make_psd_plot(
-        df, station_name=station_name, compare_data=compare_data
-    )
-    stats = figures.compute_stats(df)
+    # Build figures
+    fig_time = figures.make_time_plot(df, station_name,
+                                      compare_data=compare_data,
+                                      remove_bias=remove_bias,
+                                      start_date=start_date,
+                                      end_date=end_date)
+    fig_psd = figures.make_psd_plot(df, station_name=station_name,
+                                    compare_data=compare_data,
+                                    remove_bias=remove_bias,
+                                    start_date=start_date,
+                                    end_date=end_date)
 
-    # ── Regression ────────────────────────────────────────────────
-    reg = figures.compute_regression(
-        df,
-        method=reg_method or "ols",
-        lag=lag_value or 72,
-    )
-    fig_reg = figures.make_regression_plot(reg, station_name=station_name)
-    fig_acf = figures.make_acf_plot(
-        reg=reg, station_name=station_name, df=df
-    )
+    # Statistics
+    stats = figures.compute_stats(df, remove_bias=remove_bias)
+    stats_card = _build_stats_card(stats)
 
-    return (
-        fig_time,
-        fig_psd,
-        _build_stats_card(stats),
-        _build_regression_card(reg),
-        fig_reg,
-        fig_acf,
-    )
+    return fig_time, fig_psd, stats_card
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Card builders
-# ═══════════════════════════════════════════════════════════════════════
+# ── Regression tab → regression-plot + acf-plot ──────────────────────────
+@callback(
+    Output("regression-plot", "figure"),
+    Output("acf-plot", "figure"),
+    Output("irf-plot", "figure"),
+    Input("station-dropdown", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+    Input("reg-method", "value"),
+    Input("lag-slider", "value"),
+    Input("remove-bias-toggle", "value"),
+)
+def update_regression(station_id, start_date, end_date, reg_method, lag_value, remove_bias):
+    """Compute and render regression figures when the Regression tab is active."""
+    remove_bias = bool(remove_bias)
+    empty_reg = figures.make_regression_plot({}, "")
+    empty_acf = figures.make_acf_plot({}, "")
+    empty_irf = figures.make_irf_plot({}, "")
+    if not station_id:
+        return empty_reg, empty_acf, empty_irf
+
+    stations = data_loader.get_stations()
+    name_map = {s["id"]: s["name"] for s in stations}
+    station_name = name_map.get(station_id, station_id)
+
+    df = data_loader.get_station_data(station_id, start_date, end_date)
+    if df.empty:
+        return empty_reg, empty_acf, empty_irf
+
+    lag = lag_value if reg_method == "miso" else 0
+    reg = figures.compute_regression(df, method=reg_method or "ols",
+                                     lag=lag or 0, remove_bias=remove_bias)
+
+    fig_reg = figures.make_regression_plot(reg, station_name, start_date, end_date)
+    fig_acf = figures.make_acf_plot(reg, station_name, remove_bias=remove_bias,
+                                     start_date=start_date, end_date=end_date)
+    fig_irf = figures.make_irf_plot(reg, station_name, start_date, end_date)
+    return fig_reg, fig_acf, fig_irf
+
+
+# ── Error Statistics tab → error-stats-plot ──────────────────────────────
+@callback(
+    Output("error-stats-plot", "figure"),
+    Input("station-dropdown", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+    Input("remove-bias-toggle", "value"),
+)
+def update_error_stats(station_id, start_date, end_date, remove_bias):
+    """Generate error distribution histogram for the selected station."""
+    remove_bias = bool(remove_bias)
+    if not station_id:
+        return figures.make_error_stats_plot(pd.DataFrame())
+
+    stations = data_loader.get_stations()
+    name_map = {s["id"]: s["name"] for s in stations}
+    station_name = name_map.get(station_id, station_id)
+
+    df = data_loader.get_station_data(station_id, start_date, end_date)
+
+    return figures.make_error_stats_plot(
+        df, station_name,
+        remove_bias=remove_bias,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
 
 def _build_stats_card(stats: dict):
+    """Build a Bootstrap card showing error statistics."""
     if stats["total"] == 0:
         return dbc.Alert("No data for this selection.", color="warning")
 
     rows = [
         ("Total timestamps", f"{stats['total']:,}"),
         ("Valid (matched)", f"{stats['valid']:,}  ({stats['pct_valid']}%)"),
-        ("Bias (mean ε)", f"{stats['bias']:+.5f} m"),
-        ("RMSE", f"{stats['rmse']:.5f} m"),
-        ("MAE", f"{stats['mae']:.5f} m"),
         ("Std (σ)", f"{stats['std']:.5f} m"),
     ]
 
     return dbc.Card(
-        dbc.CardBody(
-            [
-                html.Table(
-                    [
-                        html.Tr(
-                            [
-                                html.Td(label, className="pe-3 text-muted small"),
-                                html.Td(html.Strong(value), className="small"),
-                            ]
-                        )
-                        for label, value in rows
-                    ],
-                    className="mb-0",
-                )
-            ]
-        ),
-        className="shadow-sm",
-    )
-
-
-def _build_regression_card(reg: dict):
-    if not reg.get("ok"):
-        return html.Span(
-            "Insufficient data (need atmospheric columns).",
-            className="text-muted small",
-        )
-
-    method_label = (
-        "OLS"
-        if reg["method"] == "ols"
-        else f"MISO  L = {reg['lag']} h"
-    )
-
-    def _color(v):
-        return "#C0392B" if v < 0 else "#1A6B9A"
-
-    # Metrics row
-    metrics = [
-        ("R²", f"{reg['r2']:.3f}", None),
-        ("RMSE", f"{reg['rmse'] * 100:.2f} cm", None),
-        ("DW", f"{reg['dw']:.2f}", None),
-        ("Bias", f"{reg['bias'] * 100:+.2f} cm", _color(reg["bias"])),
-    ]
-    metrics_row = dbc.Row(
-        [
-            dbc.Col(
-                [
-                    html.Div(lbl, className="text-muted text-center",
-                             style={"fontSize": "10px"}),
-                    html.Div(
-                        val,
-                        className="fw-bold text-center",
-                        style={
-                            "fontSize": "14px",
-                            **({"color": clr} if clr else {}),
-                        },
-                    ),
-                ],
-                width=3,
+        dbc.CardBody([
+            html.Table(
+                [html.Tr([
+                    html.Td(label, className="pe-3 text-muted small"),
+                    html.Td(html.Strong(value), className="small"),
+                ]) for label, value in rows],
+                className="mb-0",
             )
-            for lbl, val, clr in metrics
-        ],
-        className="mb-2",
-    )
-
-    # β table
-    coef_rows = [
-        html.Tr(
-            [
-                html.Td(label, className="pe-2 text-muted small"),
-                html.Td(
-                    html.Span(
-                        f"{v:+.4f} m/σ",
-                        style={
-                            "color": _color(v),
-                            "fontWeight": "600",
-                            "fontSize": "12px",
-                        },
-                    )
-                ),
-            ]
-        )
-        for label, v in reg["coefs"].items()
-    ]
-
-    lag_note = " (lag-0 only)" if reg["method"] == "miso" else ""
-
-    return html.Div(
-        [
-            html.Div(
-                html.Span(method_label, className="badge bg-accent"),
-                className="text-center mb-2",
-            ),
-            metrics_row,
-            html.Hr(className="my-1"),
-            html.Div(
-                f"Standardised β{lag_note}",
-                className="text-muted mb-1",
-                style={"fontSize": "11px"},
-            ),
-            html.Table(coef_rows, className="mb-0 w-100"),
-            html.Div(
-                f"n = {reg['n']:,}",
-                className="text-muted mt-1",
-                style={"fontSize": "10px", "textAlign": "right"},
-            ),
-        ]
+        ]),
+        className="shadow-sm",
     )
