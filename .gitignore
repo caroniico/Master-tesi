@@ -38,3 +38,6 @@ data/*.csv
 
 # Results folder
 RESULTS/
+# DTU10 grid files (large binary, stored locally)
+data/dtu10_grids/
+~$*
