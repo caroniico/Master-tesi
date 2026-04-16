@@ -193,10 +193,14 @@ def build_layout() -> dbc.Container:
                                             dbc.RadioItems(
                                                 id="reg-method",
                                                 options=[
-                                                    {"label": "MISO no lag",
+                                                    {"label": "OLS no lag",
                                                      "value": "ols"},
-                                                    {"label": "MISO lag",
+                                                    {"label": "OLS lag",
                                                      "value": "miso"},
+                                                    {"label": "Ridge no lag",
+                                                     "value": "ridge"},
+                                                    {"label": "Ridge lag",
+                                                     "value": "ridge-miso"},
                                                 ],
                                                 value="ols",
                                                 inline=True,
@@ -233,6 +237,21 @@ def build_layout() -> dbc.Container:
                                                 ],
                                                 style={"display": "none"},
                                             ),
+                                            html.Hr(className="my-2"),
+                                            dbc.Switch(
+                                                id="include-tide-toggle",
+                                                label="Include DTU10 tides",
+                                                value=False,
+                                                className="small",
+                                            ),
+                                            html.P(
+                                                "Aggiunge il segnale di marea DTU10/GOT4.7 "
+                                                "come feature nella regressione.",
+                                                className="text-muted",
+                                                style={"fontSize": "11px",
+                                                       "lineHeight": "1.3",
+                                                       "marginTop": "2px"},
+                                            ),
                                         ],
                                     ),
 
@@ -253,6 +272,34 @@ def build_layout() -> dbc.Container:
                                                 label="Rimuovi bias",
                                                 value=False,
                                                 className="small",
+                                            ),
+                                        ],
+                                    ),
+
+                                    # ── Surge threshold (Event Library) ──
+                                    _card(
+                                        "exclamation-triangle-fill",
+                                        "Storm Surge",
+                                        [
+                                            html.Label(
+                                                "Threshold TG [m]",
+                                                className="text-muted small mb-1",
+                                            ),
+                                            dcc.Slider(
+                                                id="surge-thresh-slider",
+                                                min=0.4, max=1.5, step=0.05,
+                                                value=0.80,
+                                                marks={
+                                                    0.5: "0.5",
+                                                    0.8: "0.8",
+                                                    1.0: "1.0",
+                                                    1.2: "1.2",
+                                                    1.5: "1.5",
+                                                },
+                                                tooltip={
+                                                    "placement": "bottom",
+                                                    "always_visible": True,
+                                                },
                                             ),
                                         ],
                                     ),
@@ -439,6 +486,273 @@ def build_layout() -> dbc.Container:
                                                             className="p-2",
                                                         ),
                                                         className="shadow-sm",
+                                                    ),
+                                                ],
+                                            ),
+                                            # ── Tab 4: Event Library ─
+                                            dbc.Tab(
+                                                label="Event Library",
+                                                tab_id="event-library",
+                                                children=[
+                                                    # Overview plot
+                                                    dbc.Card(
+                                                        dbc.CardBody(
+                                                            dcc.Loading(
+                                                                type="circle",
+                                                                color=_ACCENT,
+                                                                children=[dcc.Graph(
+                                                                    id="ev-overview-plot",
+                                                                    config={"displayModeBar": True, "displaylogo": False},
+                                                                    style={"height": "260px"},
+                                                                )],
+                                                            ),
+                                                            className="p-2",
+                                                        ),
+                                                        className="shadow-sm mb-3 mt-3",
+                                                    ),
+                                                    # Detected events table
+                                                    dbc.Card(
+                                                        dbc.CardBody([
+                                                            dbc.Row([
+                                                                dbc.Col(
+                                                                    html.H6(
+                                                                        [html.I(className="bi bi-search me-2"),
+                                                                         "Detected Events"],
+                                                                        className="mb-2",
+                                                                    ),
+                                                                    width=True,
+                                                                ),
+                                                                dbc.Col(
+                                                                    dbc.Button(
+                                                                        [html.I(className="bi bi-lightning-charge-fill me-1"),
+                                                                         "Batch Save All"],
+                                                                        id="ev-batch-save-btn",
+                                                                        size="sm",
+                                                                        color="warning",
+                                                                        title="Detect all events and run all 4 regression methods (±15 days window) — save to library",
+                                                                    ),
+                                                                    width="auto",
+                                                                ),
+                                                            ], align="center", className="mb-2"),
+                                                            dbc.Alert(
+                                                                id="ev-batch-feedback",
+                                                                is_open=False,
+                                                                duration=6000,
+                                                                color="info",
+                                                                className="mb-2 py-2 small",
+                                                            ),
+                                                            html.Div(id="ev-detected-table"),
+                                                            dbc.Alert(
+                                                                id="ev-save-feedback",
+                                                                is_open=False,
+                                                                duration=3000,
+                                                                color="success",
+                                                                className="mt-2 mb-0 py-2 small",
+                                                            ),
+                                                        ]),
+                                                        className="shadow-sm mb-3",
+                                                    ),
+                                                    # Saved library
+                                                    dbc.Card(
+                                                        dbc.CardBody([
+                                                            dbc.Row([
+                                                                dbc.Col(
+                                                                    html.H6(
+                                                                        [html.I(className="bi bi-bookmark-check me-2"),
+                                                                         "Saved Library"],
+                                                                        className="mb-2",
+                                                                    ),
+                                                                    width=True,
+                                                                ),
+                                                                dbc.Col(
+                                                                    dbc.Button(
+                                                                        [html.I(className="bi bi-download me-1"),
+                                                                         "Export JSON"],
+                                                                        id="ev-export-btn",
+                                                                        size="sm",
+                                                                        color="secondary",
+                                                                        outline=True,
+                                                                    ),
+                                                                    width="auto",
+                                                                ),
+                                                            ], align="center", className="mb-2"),
+                                                            html.Div(id="ev-saved-table"),
+                                                            dcc.Download(id="ev-download"),
+                                                        ]),
+                                                        className="shadow-sm mb-3",
+                                                    ),
+                                                    # Event zoom plot
+                                                    dbc.Card(
+                                                        dbc.CardBody(
+                                                            dcc.Loading(
+                                                                type="circle",
+                                                                color=_ACCENT,
+                                                                children=[dcc.Graph(
+                                                                    id="ev-zoom-plot",
+                                                                    config={"displayModeBar": True, "displaylogo": False},
+                                                                    style={"height": "420px"},
+                                                                )],
+                                                            ),
+                                                            className="p-2",
+                                                        ),
+                                                        className="shadow-sm",
+                                                    ),
+                                                    # ── Hidden stores ────────────────────
+                                                    dcc.Store(id="ev-selected-store"),
+                                                    dcc.Store(id="ev-edit-store"),
+                                                    # ── Save/Edit modal ──────────────────
+                                                    dbc.Modal([
+                                                        dbc.ModalHeader(
+                                                            dbc.ModalTitle(
+                                                                [html.I(className="bi bi-bookmark-plus me-2"),
+                                                                 html.Span(id="ev-modal-title")],
+                                                            ),
+                                                            close_button=True,
+                                                        ),
+                                                        dbc.ModalBody([
+                                                            # ── Read-only summary ─────────
+                                                            dbc.Row([
+                                                                dbc.Col([
+                                                                    dbc.Label("Peak time", className="small text-muted mb-0"),
+                                                                    html.Div(id="ev-modal-peak-time",
+                                                                             className="fw-semibold"),
+                                                                ], width=4),
+                                                                dbc.Col([
+                                                                    dbc.Label("Peak TG [m]", className="small text-muted mb-0"),
+                                                                    html.Div(id="ev-modal-peak-tg",
+                                                                             className="fw-semibold"),
+                                                                ], width=4),
+                                                                dbc.Col([
+                                                                    dbc.Label("Duration [h]", className="small text-muted mb-0"),
+                                                                    html.Div(id="ev-modal-duration",
+                                                                             className="fw-semibold"),
+                                                                ], width=4),
+                                                            ], className="mb-3 p-2 rounded",
+                                                              style={"background": "#f8f9fa"}),
+                                                            html.Hr(className="my-2"),
+                                                            # ── Editable standard fields ──
+                                                            dbc.Row([
+                                                                dbc.Col([
+                                                                    dbc.Label("Note", className="small"),
+                                                                    dbc.Textarea(
+                                                                        id="ev-field-note",
+                                                                        rows=2,
+                                                                        placeholder="Free text note…",
+                                                                        className="form-control form-control-sm",
+                                                                    ),
+                                                                ], width=12),
+                                                            ], className="mb-2"),
+                                                            dbc.Row([
+                                                                dbc.Col([
+                                                                    dbc.Label("Quality", className="small"),
+                                                                    dbc.Select(
+                                                                        id="ev-field-quality",
+                                                                        options=[
+                                                                            {"label": "—", "value": ""},
+                                                                            {"label": "Good", "value": "good"},
+                                                                            {"label": "Uncertain", "value": "uncertain"},
+                                                                            {"label": "Poor", "value": "poor"},
+                                                                        ],
+                                                                        value="",
+                                                                        className="form-select form-select-sm",
+                                                                    ),
+                                                                ], width=4),
+                                                                dbc.Col([
+                                                                    dbc.Label("Wind direction", className="small"),
+                                                                    dbc.Input(
+                                                                        id="ev-field-wind-dir",
+                                                                        placeholder="e.g. NW",
+                                                                        type="text",
+                                                                        size="sm",
+                                                                    ),
+                                                                ], width=4),
+                                                                dbc.Col([
+                                                                    dbc.Label("Min SLP [hPa]", className="small"),
+                                                                    dbc.Input(
+                                                                        id="ev-field-pressure",
+                                                                        placeholder="e.g. 985",
+                                                                        type="number",
+                                                                        size="sm",
+                                                                    ),
+                                                                ], width=4),
+                                                            ], className="mb-2"),
+                                                            dbc.Row([
+                                                                dbc.Col([
+                                                                    dbc.Label("Max |ε| [m]", className="small"),
+                                                                    dbc.Input(
+                                                                        id="ev-field-max-error",
+                                                                        placeholder="auto or manual",
+                                                                        type="number",
+                                                                        step=0.001,
+                                                                        size="sm",
+                                                                    ),
+                                                                ], width=4),
+                                                                dbc.Col([
+                                                                    dbc.Label("Tags (comma-separated)", className="small"),
+                                                                    dbc.Input(
+                                                                        id="ev-field-tags",
+                                                                        placeholder="e.g. westerly, long",
+                                                                        type="text",
+                                                                        size="sm",
+                                                                    ),
+                                                                ], width=5),
+                                                                dbc.Col([
+                                                                    dbc.Label("Exclude from analysis", className="small"),
+                                                                    dbc.Checkbox(
+                                                                        id="ev-field-exclude",
+                                                                        value=False,
+                                                                        className="mt-1",
+                                                                    ),
+                                                                ], width=3),
+                                                            ], className="mb-3"),
+                                                            html.Hr(className="my-2"),
+                                                            # ── Custom key-value fields ───
+                                                            dbc.Row([
+                                                                dbc.Col(
+                                                                    html.H6([
+                                                                        html.I(className="bi bi-plus-circle me-1"),
+                                                                        "Custom Fields",
+                                                                    ], className="small fw-semibold mb-1"),
+                                                                    width=True,
+                                                                ),
+                                                                dbc.Col(
+                                                                    dbc.Button(
+                                                                        [html.I(className="bi bi-plus me-1"), "Add field"],
+                                                                        id="ev-add-custom-field-btn",
+                                                                        size="sm",
+                                                                        color="secondary",
+                                                                        outline=True,
+                                                                    ),
+                                                                    width="auto",
+                                                                ),
+                                                            ], align="center", className="mb-1"),
+                                                            html.Div(
+                                                                id="ev-custom-fields-container",
+                                                                className="mb-2",
+                                                            ),
+                                                        ]),
+                                                        dbc.ModalFooter([
+                                                            dbc.Button(
+                                                                "Cancel",
+                                                                id="ev-modal-cancel-btn",
+                                                                color="secondary",
+                                                                outline=True,
+                                                                size="sm",
+                                                                className="me-2",
+                                                            ),
+                                                            dbc.Button(
+                                                                [html.I(className="bi bi-floppy me-1"),
+                                                                 "Save event"],
+                                                                id="ev-modal-save-btn",
+                                                                color="primary",
+                                                                size="sm",
+                                                            ),
+                                                        ]),
+                                                    ],
+                                                        id="ev-edit-modal",
+                                                        is_open=False,
+                                                        size="lg",
+                                                        backdrop="static",
                                                     ),
                                                 ],
                                             ),

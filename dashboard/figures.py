@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.signal import welch
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, RidgeCV
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.stattools import acf
@@ -395,6 +395,8 @@ def compute_stats(df: pd.DataFrame, remove_bias: bool = False) -> dict:
 
 _REG_FEATURES = ["SLP", "t2m", "u10", "v10"]
 _REG_LABELS   = ["SLP", "T2m", "u10", "v10"]
+_TIDE_FEATURE = "tide_dtu10_m"
+_TIDE_LABEL   = "DTU10 tide"
 
 
 def compute_regression(
@@ -402,25 +404,31 @@ def compute_regression(
     method: str = "ols",
     lag: int = 0,
     remove_bias: bool = False,
+    include_tide: bool = False,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> dict:
-    """Regression  ε(t) ~ f(SLP, T2m, u10, v10).
+    """Regression  ε(t) ~ f(SLP, T2m, u10, v10 [, DTU10 tide]).
 
     Parameters
     ----------
-    df          : DataFrame with valid_time, SLP, t2m, u10, v10, error_m.
-    method      : ``"ols"`` (instantaneous) or ``"miso"`` (MISO lag).
-    lag         : max lag *L* in hours (only when *method* = ``"miso"``).
-    remove_bias : if True, subtract the per-station temporal mean bias from
-                  ``error_m`` before fitting.
+    df            : DataFrame with valid_time, SLP, t2m, u10, v10, error_m.
+    method        : ``"ols"`` | ``"miso"`` | ``"ridge"`` | ``"ridge-miso"``.
+    lag           : max lag *L* in hours (only for ``"miso"`` and ``"ridge-miso"``).
+    remove_bias   : if True, subtract the per-station temporal mean bias from
+                    ``error_m`` before fitting.
+    include_tide  : if True, add DTU10 tidal signal as an extra feature.
+    lat, lon      : station coordinates required when include_tide=True.
 
     Returns dict with: ok, r2, rmse, bias, dw, coefs, n, method, lag,
-                        y, y_pred, residuals, time, beta_matrix.
+                        y, y_pred, residuals, time, beta_matrix, alpha,
+                        include_tide.
     """
     empty: dict = {
         "ok": False, "r2": np.nan, "rmse": np.nan, "bias": np.nan,
         "dw": np.nan, "coefs": {}, "n": 0, "method": method, "lag": lag,
         "y": None, "y_pred": None, "residuals": None, "time": None,
-        "beta_matrix": None,
+        "beta_matrix": None, "alpha": None, "include_tide": include_tide,
     }
 
     needed = _REG_FEATURES + ["error_m"]
@@ -429,13 +437,39 @@ def compute_regression(
 
     df = _apply_bias_correction(df, remove_bias)
 
-    if method == "miso" and lag >= 1:
-        return _compute_miso(df, lag, empty)
-    return _compute_ols(df, empty)
+    # ── Optionally add DTU10 tidal feature ──────────────────────────────
+    features = list(_REG_FEATURES)
+    labels   = list(_REG_LABELS)
+    if include_tide and lat is not None and lon is not None:
+        try:
+            from . import tide_loader as _tl
+            times = df["valid_time"] if "valid_time" in df.columns else df.index
+            tide_vals = _tl.get_tide_series(lat, lon, times)
+            df = df.copy()
+            df[_TIDE_FEATURE] = tide_vals
+            features.append(_TIDE_FEATURE)
+            labels.append(_TIDE_LABEL)
+        except Exception:
+            pass  # fall back to running without tide
+
+    use_ridge = method in ("ridge", "ridge-miso")
+    use_lag   = method in ("miso", "ridge-miso") and lag >= 1
+
+    if use_lag:
+        return _compute_miso(df, lag, empty, use_ridge=use_ridge,
+                             features=features, labels=labels)
+    return _compute_ols(df, empty, use_ridge=use_ridge,
+                        features=features, labels=labels)
 
 
-def _compute_ols(df: pd.DataFrame, empty: dict) -> dict:
-    cols = _REG_FEATURES + ["error_m"]
+def _compute_ols(df: pd.DataFrame, empty: dict, use_ridge: bool = False,
+                 features: list | None = None, labels: list | None = None) -> dict:
+    if features is None:
+        features = _REG_FEATURES
+    if labels is None:
+        labels = _REG_LABELS
+
+    cols = features + ["error_m"]
     has_time = "valid_time" in df.columns
     if has_time:
         cols = cols + ["valid_time"]
@@ -445,10 +479,18 @@ def _compute_ols(df: pd.DataFrame, empty: dict) -> dict:
         return empty
 
     scaler = StandardScaler()
-    X = scaler.fit_transform(sub[_REG_FEATURES].values)
+    X = scaler.fit_transform(sub[features].values)
     y = sub["error_m"].values
 
-    model = LinearRegression().fit(X, y)
+    if use_ridge:
+        model = RidgeCV(alphas=np.logspace(-3, 4, 50)).fit(X, y)
+        alpha_val = float(model.alpha_)
+        method_lbl = "ridge"
+    else:
+        model = LinearRegression().fit(X, y)
+        alpha_val = None
+        method_lbl = "ols"
+
     y_pred = model.predict(X)
     residuals = y - y_pred
 
@@ -458,15 +500,23 @@ def _compute_ols(df: pd.DataFrame, empty: dict) -> dict:
         "rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
         "bias": float(y_pred.mean() - y.mean()),
         "dw": float(durbin_watson(residuals)),
-        "coefs": {lbl: float(c) for lbl, c in zip(_REG_LABELS, model.coef_)},
-        "n": len(sub), "method": "ols", "lag": 0,
+        "coefs": {lbl: float(c) for lbl, c in zip(labels, model.coef_)},
+        "n": len(sub), "method": method_lbl, "lag": 0,
         "y": y, "y_pred": y_pred, "residuals": residuals,
         "time": sub["valid_time"].values if has_time else None,
-        "beta_matrix": None,
+        "beta_matrix": None, "alpha": alpha_val,
+        "include_tide": _TIDE_FEATURE in features,
+        "features": features, "labels": labels,
     }
 
 
-def _compute_miso(df: pd.DataFrame, lag: int, empty: dict) -> dict:
+def _compute_miso(df: pd.DataFrame, lag: int, empty: dict, use_ridge: bool = False,
+                  features: list | None = None, labels: list | None = None) -> dict:
+    if features is None:
+        features = _REG_FEATURES
+    if labels is None:
+        labels = _REG_LABELS
+
     L = lag
     sub = df.copy()
     has_time = "valid_time" in sub.columns
@@ -474,7 +524,7 @@ def _compute_miso(df: pd.DataFrame, lag: int, empty: dict) -> dict:
         sub = sub.sort_values("valid_time").reset_index(drop=True)
 
     lag_dict: dict[str, pd.Series] = {}
-    for feat in _REG_FEATURES:
+    for feat in features:
         for k in range(L + 1):
             lag_dict[f"{feat}_lag{k:03d}"] = sub[feat].shift(k)
 
@@ -491,10 +541,18 @@ def _compute_miso(df: pd.DataFrame, lag: int, empty: dict) -> dict:
     scaler = StandardScaler()
     X_sc = scaler.fit_transform(X_raw)
 
-    model = LinearRegression().fit(X_sc, y)
+    if use_ridge:
+        model = RidgeCV(alphas=np.logspace(-3, 4, 50)).fit(X_sc, y)
+        alpha_val = float(model.alpha_)
+        method_lbl = "ridge-miso"
+    else:
+        model = LinearRegression().fit(X_sc, y)
+        alpha_val = None
+        method_lbl = "miso"
+
     y_pred = model.predict(X_sc)
     residuals = y - y_pred
-    beta_matrix = model.coef_.reshape(len(_REG_FEATURES), L + 1)
+    beta_matrix = model.coef_.reshape(len(features), L + 1)
 
     return {
         "ok": True,
@@ -503,11 +561,13 @@ def _compute_miso(df: pd.DataFrame, lag: int, empty: dict) -> dict:
         "bias": float(y_pred.mean() - y.mean()),
         "dw": float(durbin_watson(residuals)),
         "coefs": {lbl: float(beta_matrix[i, 0])
-                  for i, lbl in enumerate(_REG_LABELS)},
-        "n": len(df_model), "method": "miso", "lag": L,
+                  for i, lbl in enumerate(labels)},
+        "n": len(df_model), "method": method_lbl, "lag": L,
         "y": y, "y_pred": y_pred, "residuals": residuals,
         "time": df_model["valid_time"].values if has_time else None,
-        "beta_matrix": beta_matrix,
+        "beta_matrix": beta_matrix, "alpha": alpha_val,
+        "include_tide": _TIDE_FEATURE in features,
+        "features": features, "labels": labels,
     }
 
 
@@ -522,7 +582,7 @@ def make_regression_plot(reg: dict, station_name: str = "", start_date: str = ""
         fig.update_layout(height=300, template="plotly_white")
         return fig
 
-    if reg["method"] == "miso":
+    if reg["method"] in ("miso", "ridge-miso"):
         return _make_miso_fig(reg, station_name, start_date, end_date)
     return _make_ols_fig(reg, station_name, start_date, end_date)
 
@@ -688,8 +748,10 @@ def make_acf_plot(
     if reg and reg.get("ok") and reg.get("residuals") is not None:
         series = reg["residuals"]
         meth = reg["method"].upper()
-        if reg["method"] == "miso":
+        if reg["method"] in ("miso", "ridge-miso"):
             meth += f" L={reg['lag']}h"
+        if reg.get("alpha") is not None:
+            meth += f"  α={reg['alpha']:.3g}"
         acf_label = f"Regression Residuals ({meth})"
         dw_val = reg["dw"]
     elif df is not None and not df.empty and "error_m" in df.columns:
