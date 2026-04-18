@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_DATA_DIR = Path("/Users/nicolocaron/Desktop/MASTER PROJECT/DATASET COMPLETI 6 STAZIONI INIZIALI")
+_DATA_DIR = Path("/Users/nicolocaron/Desktop/MASTER PROJECT/data")
 _PER_STATION_DIR = _DATA_DIR / "per_station"
 
 # ── Module-level cache ───────────────────────────────────────────────────
